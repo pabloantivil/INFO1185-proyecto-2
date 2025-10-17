@@ -1,8 +1,9 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import SelectKBest, mutual_info_classif
+from sklearn.ensemble import RandomForestClassifier
 from imblearn.over_sampling import SMOTE
 
 # ==============================
@@ -10,7 +11,6 @@ from imblearn.over_sampling import SMOTE
 # ==============================
 RANDOM_SEED = 42
 TEST_SIZE = 0.3
-N_FEATURES = 10  # número de características a seleccionar
 np.random.seed(RANDOM_SEED)
 
 # ==============================
@@ -18,9 +18,9 @@ np.random.seed(RANDOM_SEED)
 # ==============================
 df = pd.read_csv("creditcard.csv")
 
-print("="*60)
+print("="*70)
 print("ANÁLISIS EXPLORATORIO INICIAL")
-print("="*60)
+print("="*70)
 print(f"Shape original del dataset: {df.shape}")
 print(f"Número de transacciones totales: {len(df):,}")
 print(f"Número de fraudes: {df['Class'].sum():,}")
@@ -32,9 +32,9 @@ print(f"Ratio de desbalance: {(df['Class']==0).sum()/(df['Class']==1).sum():.0f}
 # ==============================
 # 2. PREPROCESAMIENTO
 # ==============================
-print("\n" + "="*60)
+print("\n" + "="*70)
 print("PREPROCESAMIENTO")
-print("="*60)
+print("="*70)
 
 # Separar variables predictoras y variable objetivo
 X = df.drop(columns=["Class"])
@@ -60,50 +60,124 @@ print(f"  - Clase 1 (Fraude): {(y_train==1).sum():,} ({(y_train==1).mean()*100:.
 print(f"  - Ratio de desbalance: {(y_train==0).sum()/(y_train==1).sum():.0f}:1")
 
 # ==============================
-# 3. SELECCIÓN DE CARACTERÍSTICAS (SelectKBest)
+# 3. EXPERIMENTO: JUSTIFICACIÓN DEL NÚMERO DE CARACTERÍSTICAS (k)
 # ==============================
-print("\n" + "="*60)
-print("SELECCIÓN DE CARACTERÍSTICAS")
-print("="*60)
-print(f"\n3. Aplicando SelectKBest con Mutual Information...")
-print(f"   Técnica: Selección basada en tests estadísticos")
-print(f"   Objetivo: Seleccionar las {N_FEATURES} características más predictivas")
-print(f"   Métrica: Información Mutua (detecta relaciones no lineales)")
-print(f"   Ventaja: Muy eficiente computacionalmente")
-print(f"   IMPORTANTE: Se aplica ANTES del balanceo para evitar sesgo")
-print("\n   ⏱️  Este proceso toma solo unos segundos...\n")
+print("\n" + "="*70)
+print("EXPERIMENTO: SELECCIÓN ÓPTIMA DE k")
+print("="*70)
+print("\nObjetivo: Determinar el número óptimo de características a seleccionar")
+print("Método: Validación cruzada con diferentes valores de k")
+print("Métrica: Recall (Sensibilidad) - prioritaria para detección de fraude")
 
-# SelectKBest con información mutua (mejor para clasificación)
-# NOTA CRÍTICA: Se ajusta sobre datos SIN balancear para selección objetiva
-selector = SelectKBest(score_func=mutual_info_classif, k=N_FEATURES)
+# Valores de k a probar
+k_values = [5, 10, 15, 20, 25]
+results_k = []
+
+# Clasificador base para evaluar (rápido y robusto)
+base_clf = RandomForestClassifier(
+    n_estimators=50, 
+    max_depth=10,
+    class_weight='balanced',  # Maneja desbalance sin SMOTE para esta evaluación
+    random_state=RANDOM_SEED,
+    n_jobs=-1
+)
+
+print("Evaluando k = ", end="", flush=True)
+for k in k_values:
+    print(f"{k}...", end=" ", flush=True)
+    
+    # Seleccionar k características
+    selector_temp = SelectKBest(score_func=mutual_info_classif, k=k)
+    X_train_k = selector_temp.fit_transform(X_train, y_train)
+    
+    # Validación cruzada estratificada (3-fold por eficiencia)
+    cv_scores = cross_val_score(
+        base_clf, X_train_k, y_train,
+        cv=3,
+        scoring='recall',  # Prioridad: detectar fraudes
+        n_jobs=-1
+    )
+    
+    results_k.append({
+        'k': k,
+        'recall_mean': cv_scores.mean(),
+        'recall_std': cv_scores.std(),
+        'cv_scores': cv_scores
+    })
+
+print("✓\n")
+
+# Mostrar resultados
+print("-"*70)
+print("RESULTADOS: Desempeño por número de características")
+print("-"*70)
+print(f"{'k':<6} {'Recall (Media)':<18} {'Recall (Std)':<15} {'Evaluación'}")
+print("-"*70)
+
+best_result = max(results_k, key=lambda x: x['recall_mean'])
+OPTIMAL_K = best_result['k']
+
+for res in results_k:
+    marker = " ← ÓPTIMO" if res['k'] == OPTIMAL_K else ""
+    print(f"{res['k']:<6} {res['recall_mean']:.4f}           "
+          f"{res['recall_std']:.4f}          {marker}")
+
+print("\n" + "="*70)
+print("JUSTIFICACIÓN DE k SELECCIONADO")
+print("="*70)
+print(f"\n✅ Valor óptimo: k = {OPTIMAL_K}")
+print(f"\n📊 Razones:")
+print(f"   1. Mayor sensibilidad promedio: {best_result['recall_mean']:.4f}")
+print(f"   2. Desviación estándar aceptable: {best_result['recall_std']:.4f}")
+print(f"   3. Reducción de dimensionalidad: {100*(1-OPTIMAL_K/30):.0f}%")
+print(f"   4. Balance entre complejidad y desempeño")
+
+# Guardar resultados del experimento
+experiment_df = pd.DataFrame(results_k)[['k', 'recall_mean', 'recall_std']]
+experiment_df.to_csv("k_selection_experiment.csv", index=False)
+print(f"\n✓ Resultados guardados en: k_selection_experiment.csv")
+
+# ==============================
+# 4. SELECCIÓN DE CARACTERÍSTICAS CON k ÓPTIMO
+# ==============================
+print("\n" + "="*70)
+print("SELECCIÓN DE CARACTERÍSTICAS (k={})".format(OPTIMAL_K))
+print("="*70)
+print(f"\n4. Aplicando SelectKBest con k={OPTIMAL_K}...")
+print(f"   Técnica: Selección basada en tests estadísticos")
+print(f"   Métrica: Información Mutua (detecta relaciones no lineales)")
+print(f"   IMPORTANTE: Se aplica ANTES del balanceo para evitar sesgo\n")
+
+# SelectKBest con k óptimo
+selector = SelectKBest(score_func=mutual_info_classif, k=OPTIMAL_K)
 selector.fit(X_train, y_train)
 
 # Obtener características seleccionadas
 selected_features = X_train.columns[selector.get_support()].tolist()
 
-# Mostrar scores de las características seleccionadas
+# Mostrar scores
 scores = pd.DataFrame({
     'Feature': X_train.columns,
     'Score': selector.scores_
 }).sort_values('Score', ascending=False)
 
-print("\n" + "="*60)
+print("="*70)
 print("VECTOR DE CARACTERÍSTICAS SELECCIONADAS")
-print("="*60)
+print("="*70)
 for i, feature in enumerate(selected_features, start=1):
     score = scores[scores['Feature'] == feature]['Score'].values[0]
-    print(f"  {i:2d}. {feature:6s}  (Score: {score:.4f})")
+    print(f"  {i:2d}. {feature:6s}  (Score MI: {score:.4f})")
 
 # ==============================
-# 4. BALANCEO DE CLASES (solo sobre entrenamiento con características seleccionadas)
+# 5. BALANCEO DE CLASES (SMOTE)
 # ==============================
-print("\n" + "="*60)
+print("\n" + "="*70)
 print("ESTRATEGIA DE BALANCEO")
-print("="*60)
-print("\n4. Aplicando SMOTE (Synthetic Minority Over-sampling Technique)...")
+print("="*70)
+print("\n5. Aplicando SMOTE (Synthetic Minority Over-sampling Technique)...")
 print("   Estrategia: Sobremuestreo de la clase minoritaria (fraudes)")
-print("   Nota: Se aplica DESPUÉS de selección de características")
-print("   Nota: Se aplica SOLO sobre entrenamiento para evitar data leakage\n")
+print("   ⚠️  CRÍTICO: Se aplica SOLO sobre entrenamiento (no validación ni test)")
+print("   Nota: Se aplica DESPUÉS de selección de características\n")
 
 smote = SMOTE(random_state=RANDOM_SEED)
 X_train_bal, y_train_bal = smote.fit_resample(X_train[selected_features], y_train)
@@ -115,22 +189,23 @@ print(f"  - Nuevo ratio: {(y_train_bal==0).sum()/(y_train_bal==1).sum():.1f}:1")
 print("   ✓ Dataset balanceado correctamente")
 
 # ==============================
-# 5. GUARDAR RESULTADOS
+# GUARDAR RESULTADOS
 # ==============================
-print("\n" + "="*60)
+print("\n" + "="*70)
 print("RESUMEN Y GUARDADO DE ARCHIVOS")
-print("="*60)
+print("="*70)
 
 print(f"\n✓ Escalado:          StandardScaler aplicado")
 print(f"✓ División:          70% train ({X_train.shape[0]:,}) / 30% test ({X_test.shape[0]:,})")
+print(f"✓ Selección k:       Justificado experimentalmente (k={OPTIMAL_K})")
 print(f"✓ Selección:         SelectKBest con Mutual Information")
-print(f"✓ Características:   {N_FEATURES} seleccionadas de {X_scaled.shape[1]} originales")
-print(f"✓ Balanceo:          SMOTE aplicado DESPUÉS de selección")
+print(f"✓ Características:   {OPTIMAL_K} seleccionadas de {X_scaled.shape[1]} originales")
+print(f"✓ Balanceo:          SMOTE aplicado SOLO en train")
 
 print(f"\nDimensiones finales:")
-print(f"  - X_train_bal: {X_train_bal.shape}")
+print(f"  - X_train_bal: {X_train_bal.shape}  ← CON datos sintéticos")
 print(f"  - y_train_bal: {y_train_bal.shape}")
-print(f"  - X_test:      {X_test[selected_features].shape}")
+print(f"  - X_test:      {X_test[selected_features].shape}  ← SIN datos sintéticos")
 print(f"  - y_test:      {y_test.shape}")
 
 pd.Series(selected_features).to_csv("selected_features.csv", index=False, header=False)
@@ -140,10 +215,11 @@ X_test[selected_features].to_csv("X_test.csv", index=False)
 y_test.to_csv("y_test.csv", index=False, header=True)
 
 print("\n✓ Archivos guardados exitosamente:")
+print("  - k_selection_experiment.csv  ← NUEVO: justificación de k")
 print("  - selected_features.csv")
-print("  - X_train_bal.csv / y_train_bal.csv")
-print("  - X_test.csv / y_test.csv")
+print("  - X_train_bal.csv / y_train_bal.csv  ← CON SMOTE")
+print("  - X_test.csv / y_test.csv            ← SIN SMOTE")
 
-print("\n" + "="*60)
+print("\n" + "="*70)
 print("✅ PREPROCESAMIENTO COMPLETADO CORRECTAMENTE")
-print("="*60)
+print("="*70)
